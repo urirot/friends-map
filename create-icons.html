@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html>
+<head><title>Icon Generator</title></head>
+<body>
+<canvas id="canvas192" width="192" height="192"></canvas>
+<canvas id="canvas512" width="512" height="512"></canvas>
+<div id="links"></div>
+<script>
+function createIcon(size) {
+  const canvas = document.getElementById(`canvas${size}`);
+  const ctx = canvas.getContext('2d');
+
+  // Background
+  ctx.fillStyle = '#667eea';
+  ctx.fillRect(0, 0, size, size);
+
+  // Person icon (simplified)
+  ctx.fillStyle = 'white';
+  // Head
+  ctx.beginPath();
+  ctx.arc(size/2, size*0.39, size*0.156, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Body (triangle)
+  ctx.beginPath();
+  ctx.moveTo(size/2, size*0.586);
+  ctx.lineTo(size*0.391, size*0.879);
+  ctx.lineTo(size*0.449, size*0.879);
+  ctx.lineTo(size/2, size*0.723);
+  ctx.lineTo(size*0.551, size*0.879);
+  ctx.lineTo(size*0.609, size*0.879);
+  ctx.closePath();
+  ctx.fill();
+
+  // Download link
+  canvas.toBlob(blob => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `icon-${size}.png`;
+    a.textContent = `Download icon-${size}.png`;
+    a.style.display = 'block';
+    a.style.margin = '10px';
+    document.getElementById('links').appendChild(a);
+  });
+}
+
+createIcon(192);
+createIcon(512);
+</script>
+<p>Click the links above to download the icons, then place them in the public/ folder</p>
+</body>
+</html>
