@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
 import { auth, provider, db } from './firebase';
-import { signInWithPopup, onAuthStateChanged } from 'firebase/auth';
+import { signInWithPopup, signInWithRedirect, getRedirectResult, onAuthStateChanged } from 'firebase/auth';
 import { ref, set, onValue, serverTimestamp } from 'firebase/database';
 import L from 'leaflet';
 import './App.css';
@@ -27,6 +27,15 @@ function App() {
   const [needsProfile, setNeedsProfile] = useState(false);
   const [profileName, setProfileName] = useState('');
   const [selectedEmoji, setSelectedEmoji] = useState('🐄');
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [showAdminPanel, setShowAdminPanel] = useState(false);
+  const [accessRequests, setAccessRequests] = useState({});
+  const [showIOSInstall, setShowIOSInstall] = useState(false);
+  const [isIOSSafari, setIsIOSSafari] = useState(false);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [requestingAccess, setRequestingAccess] = useState(false);
+  const [showUpdatePrompt, setShowUpdatePrompt] = useState(false);
+  const [waitingWorker, setWaitingWorker] = useState(null);
 
   // Animal emojis
   const animalEmojis = [
@@ -52,8 +61,69 @@ function App() {
 
     window.addEventListener('beforeinstallprompt', handler);
 
+    // Check if iOS and not in standalone mode (not installed)
+    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+    const isSafari = /Safari/.test(navigator.userAgent) && !/CriOS|FxiOS|EdgiOS/.test(navigator.userAgent);
+    const isStandalone = window.matchMedia('(display-mode: standalone)').matches ||
+                         window.navigator.standalone;
+
+    if (isIOS && !isStandalone) {
+      setIsIOSSafari(isSafari);
+      // Show iOS install prompt after a short delay
+      setTimeout(() => setShowIOSInstall(true), 2000);
+    }
+
     return () => window.removeEventListener('beforeinstallprompt', handler);
   }, []);
+
+  // Handle service worker updates
+  useEffect(() => {
+    if (!('serviceWorker' in navigator)) return;
+
+    const checkForUpdates = () => {
+      navigator.serviceWorker.ready.then((registration) => {
+        registration.update();
+      });
+    };
+
+    // Check for updates every 60 seconds
+    const interval = setInterval(checkForUpdates, 60000);
+
+    // Listen for new service worker
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      // New service worker has taken control - reload the page
+      window.location.reload();
+    });
+
+    // Detect waiting service worker
+    navigator.serviceWorker.ready.then((registration) => {
+      if (registration.waiting) {
+        setWaitingWorker(registration.waiting);
+        setShowUpdatePrompt(true);
+      }
+
+      registration.addEventListener('updatefound', () => {
+        const newWorker = registration.installing;
+        newWorker.addEventListener('statechange', () => {
+          if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+            // New service worker installed, show update prompt
+            setWaitingWorker(newWorker);
+            setShowUpdatePrompt(true);
+          }
+        });
+      });
+    });
+
+    return () => clearInterval(interval);
+  }, []);
+
+  // Handle update click
+  const handleUpdate = () => {
+    if (waitingWorker) {
+      waitingWorker.postMessage({ type: 'SKIP_WAITING' });
+      setShowUpdatePrompt(false);
+    }
+  };
 
   // Handle install click
   const handleInstall = async () => {
@@ -68,6 +138,24 @@ function App() {
     }
   };
 
+  // Check for redirect result on load
+  useEffect(() => {
+    const checkRedirect = async () => {
+      try {
+        const result = await getRedirectResult(auth);
+        if (result) {
+          console.log('Redirect sign-in successful:', result.user.email);
+        }
+      } catch (err) {
+        console.error('Redirect result error:', err);
+        if (err.message?.includes('session')) {
+          setError('Sign in failed. Please enable cookies and site data in your browser settings.');
+        }
+      }
+    };
+    checkRedirect();
+  }, []);
+
   // Handle Auth State
   useEffect(() => {
     console.log('Setting up auth listener...');
@@ -75,8 +163,39 @@ function App() {
       console.log('Auth state changed:', currentUser ? currentUser.email : 'No user');
 
       if (currentUser) {
-        // Check if user has a profile
         const { get } = await import('firebase/database');
+
+        // FIRST: Check if user is whitelisted
+        const emailKey = currentUser.email.replace(/\./g, ',');
+        const whitelistRef = ref(db, 'whitelist/' + emailKey);
+        console.log('Checking whitelist for:', currentUser.email, '(key:', emailKey + ')');
+        const whitelistSnapshot = await get(whitelistRef);
+        console.log('Whitelist exists:', whitelistSnapshot.exists(), 'Value:', whitelistSnapshot.val());
+
+        if (!whitelistSnapshot.exists() || whitelistSnapshot.val() !== true) {
+          // User not whitelisted
+          console.log('User not whitelisted:', currentUser.email);
+
+          // If they're requesting access, let them stay signed in briefly
+          if (!requestingAccess) {
+            await auth.signOut();
+            setError('Access denied. Your email is not whitelisted. Click "Request Access" to get permission.');
+            return;
+          }
+
+          // They're requesting access - don't sign out, auth check complete
+          setAuthLoading(false);
+          return;
+        }
+
+        console.log('✓ User is whitelisted:', currentUser.email);
+
+        // Check if user is admin
+        const adminRef = ref(db, 'admins/' + currentUser.email.replace(/\./g, ','));
+        const adminSnapshot = await get(adminRef);
+        setIsAdmin(adminSnapshot.exists() && adminSnapshot.val() === true);
+
+        // Check if user has a profile
         const userRef = ref(db, 'users/' + currentUser.uid);
         const snapshot = await get(userRef);
 
@@ -96,10 +215,27 @@ function App() {
       } else {
         setUser(null);
         setNeedsProfile(false);
+        setIsAdmin(false);
       }
+
+      // Auth check complete
+      setAuthLoading(false);
     });
     return () => unsubscribe();
   }, []);
+
+  // Listen to access requests if admin
+  useEffect(() => {
+    if (!isAdmin) return;
+
+    const accessRequestsRef = ref(db, 'accessRequests');
+    const unsubscribe = onValue(accessRequestsRef, (snapshot) => {
+      const data = snapshot.val();
+      setAccessRequests(data || {});
+    });
+
+    return () => unsubscribe();
+  }, [isAdmin]);
 
   // Start Tracking Location
   const startTracking = async (currentUser) => {
@@ -194,51 +330,76 @@ function App() {
 
   const handleLogin = async () => {
     try {
-      const result = await signInWithPopup(auth, provider);
-      const user = result.user;
-
-      // Check if user is whitelisted
-      const whitelistRef = ref(db, 'whitelist/' + user.email.replace(/\./g, ','));
-      const { get } = await import('firebase/database');
-      const snapshot = await get(whitelistRef);
-
-      if (!snapshot.exists() || snapshot.val() !== true) {
-        // User not whitelisted - sign them out
-        await auth.signOut();
-        setError('Access denied. Your email is not whitelisted. Click "Request Access" below to get permission.');
-        return;
-      }
+      console.log('Starting Google sign-in...');
+      await signInWithPopup(auth, provider);
+      console.log('Sign-in popup completed');
+      // Whitelist check happens in onAuthStateChanged listener
     } catch (err) {
       console.error('Login error:', err);
-      if (err.code === 'PERMISSION_DENIED') {
-        setError('Access denied. Your email is not whitelisted.');
+      console.error('Error code:', err.code);
+      console.error('Error message:', err.message);
+
+      // If popup fails due to session storage issues, try redirect instead
+      if (err.code === 'auth/web-storage-unsupported' ||
+          err.code === 'auth/operation-not-supported-in-this-environment' ||
+          err.message?.includes('session')) {
+        console.log('Popup failed, trying redirect...');
+        try {
+          await signInWithRedirect(auth, provider);
+        } catch (redirectErr) {
+          console.error('Redirect error:', redirectErr);
+          setError('Failed to sign in. Please check your browser settings and allow cookies/storage.');
+        }
+      } else if (err.code === 'auth/popup-closed-by-user') {
+        // User closed popup, don't show error
+        return;
+      } else if (err.code === 'PERMISSION_DENIED' || err.message?.includes('Permission denied')) {
+        setError('Database permission denied. Check Firebase security rules.');
       } else {
-        setError('Failed to sign in. Please try again.');
+        setError(`Failed to sign in: ${err.message || 'Unknown error'}`);
       }
     }
   };
 
   const handleRequestAccess = async () => {
     try {
+      setRequestingAccess(true);
+      setError(null);
+
+      console.log('Starting access request sign-in...');
       const result = await signInWithPopup(auth, provider);
       const user = result.user;
+      console.log('User signed in for access request:', user.email);
 
       // Save access request to Firebase
       const requestRef = ref(db, 'accessRequests/' + user.email.replace(/\./g, ','));
+      console.log('Saving access request to Firebase...');
       await set(requestRef, {
         email: user.email,
         name: user.displayName,
         avatar: user.photoURL,
         requestedAt: serverTimestamp()
       });
+      console.log('Access request saved successfully');
 
       // Sign them out
       await auth.signOut();
+      setRequestingAccess(false);
 
       setError('Access request submitted! The administrator will review your request. You will be notified via email once approved.');
     } catch (err) {
       console.error('Request access error:', err);
-      setError('Failed to submit access request. Please try again.');
+      console.error('Error code:', err.code);
+      console.error('Error message:', err.message);
+      setRequestingAccess(false);
+
+      if (err.code === 'PERMISSION_DENIED' || err.message?.includes('Permission denied')) {
+        setError('Failed to submit request. Database permissions may need updating. Please contact the administrator.');
+      } else if (err.code === 'auth/popup-closed-by-user') {
+        setError(null); // User cancelled, don't show error
+      } else {
+        setError('Failed to submit access request. Please try again.');
+      }
     }
   };
 
@@ -249,19 +410,81 @@ function App() {
       return;
     }
 
+    if (!user || !user.uid) {
+      setError('Not authenticated. Please sign out and sign in again. (Error: Missing user ID)');
+      console.error('User object missing or invalid:', user);
+      return;
+    }
+
+    setError(null); // Clear any previous errors
+    setLoading(true);
+
     try {
+      console.log('Saving profile for user:', user.uid);
+      console.log('User email:', user.email);
+      console.log('Profile name:', profileName.trim());
+      console.log('Selected emoji:', selectedEmoji);
+
       const userRef = ref(db, 'users/' + user.uid);
+      console.log('Writing to database path:', 'users/' + user.uid);
+
       await set(userRef, {
         name: profileName.trim(),
         avatar: selectedEmoji,
         lastUpdated: serverTimestamp()
       });
 
+      console.log('✓ Profile saved successfully');
+      setLoading(false);
       setNeedsProfile(false);
       startTracking(user);
     } catch (err) {
+      setLoading(false);
       console.error('Error saving profile:', err);
-      setError('Failed to save profile. Please try again.');
+      console.error('Error code:', err.code);
+      console.error('Error message:', err.message);
+      console.error('Error stack:', err.stack);
+
+      // Provide detailed error messages visible to the user
+      if (err.code === 'PERMISSION_DENIED' || err.message?.includes('Permission denied')) {
+        setError(`Permission denied writing to database. Error code: ${err.code}. Please contact the administrator.`);
+      } else if (err.code === 'NETWORK_ERROR' || err.message?.includes('network')) {
+        setError(`Network error. Please check your internet connection and try again.`);
+      } else {
+        setError(`Failed to save profile. Error: ${err.code || err.message || 'Unknown error'}. Please screenshot this and send to admin.`);
+      }
+    }
+  };
+
+  // Approve access request
+  const handleApproveAccess = async (email) => {
+    try {
+      const whitelistRef = ref(db, 'whitelist/' + email.replace(/\./g, ','));
+      await set(whitelistRef, true);
+
+      // Remove from access requests
+      const requestRef = ref(db, 'accessRequests/' + email.replace(/\./g, ','));
+      await set(requestRef, null);
+
+      setError(`✅ Approved ${email}`);
+      setTimeout(() => setError(null), 3000);
+    } catch (err) {
+      console.error('Error approving access:', err);
+      setError('Failed to approve access. Please try again.');
+    }
+  };
+
+  // Reject access request
+  const handleRejectAccess = async (email) => {
+    try {
+      const requestRef = ref(db, 'accessRequests/' + email.replace(/\./g, ','));
+      await set(requestRef, null);
+
+      setError(`❌ Rejected ${email}`);
+      setTimeout(() => setError(null), 3000);
+    } catch (err) {
+      console.error('Error rejecting access:', err);
+      setError('Failed to reject access. Please try again.');
     }
   };
 
@@ -308,16 +531,33 @@ function App() {
     return (now - lastUpdated) > sixteenMinutes;
   };
 
+  // Show nothing while checking auth state
+  if (authLoading) {
+    return null;
+  }
+
   if (!user) {
+    // Show request access if they got "access denied" error, otherwise show login
+    const showRequestAccess = error && error.includes('Access denied');
+
     return (
       <div className='login-screen'>
+        <img src='/icon-192.png' alt='Egels Map' className='login-logo' />
         <h1>Egels Map</h1>
         <p>See where your friends are in real-time</p>
-        <button onClick={handleLogin}>Sign in with Google</button>
-        <button onClick={handleRequestAccess} style={{marginTop: '10px', background: '#888'}}>
-          Request Access
-        </button>
-        {error && <div className='error-message'>{error}</div>}
+        {showRequestAccess ? (
+          <button onClick={handleRequestAccess}>
+            Request Access
+          </button>
+        ) : (
+          <button onClick={handleLogin}>Sign in with Google</button>
+        )}
+        {error && (
+          <div className='error-message'>
+            {error}
+            <button className='error-close' onClick={() => setError(null)}>✕</button>
+          </div>
+        )}
       </div>
     );
   }
@@ -353,24 +593,90 @@ function App() {
             ))}
           </div>
 
-          <button onClick={handleSaveProfile} className='save-button'>
-            Save Profile
+          <button onClick={handleSaveProfile} className='save-button' disabled={loading}>
+            {loading ? 'Saving...' : 'Save Profile'}
           </button>
         </div>
-        {error && <div className='error-message'>{error}</div>}
+        {error && (
+          <div className='error-message'>
+            {error}
+            <button className='error-close' onClick={() => setError(null)}>✕</button>
+          </div>
+        )}
       </div>
     );
   }
 
   return (
     <div className='App'>
-      {error && <div className='error-message'>{error}</div>}
+      {error && (
+        <div className='error-message'>
+          {error}
+          <button className='error-close' onClick={() => setError(null)}>✕</button>
+        </div>
+      )}
 
-      {showInstallPrompt && (
+      {showUpdatePrompt && (
+        <div className='install-prompt' style={{background: '#4ade80'}}>
+          <span>🎉 New update available!</span>
+          <button onClick={handleUpdate}>Update Now</button>
+          <button onClick={() => setShowUpdatePrompt(false)} style={{background: '#888'}}>Later</button>
+        </div>
+      )}
+
+      {showInstallPrompt && !showUpdatePrompt && (
         <div className='install-prompt'>
           <span>Install Egels Map for quick access</span>
           <button onClick={handleInstall}>Install</button>
           <button onClick={() => setShowInstallPrompt(false)} style={{background: '#888'}}>Later</button>
+        </div>
+      )}
+
+      {showIOSInstall && !showUpdatePrompt && (
+        <div className='install-prompt'>
+          {isIOSSafari ? (
+            <span>📱 Tap Share → Add to Home Screen to install</span>
+          ) : (
+            <span>📱 Open in Safari to install this app</span>
+          )}
+          <button onClick={() => setShowIOSInstall(false)} style={{background: '#888'}}>Got it</button>
+        </div>
+      )}
+
+      {isAdmin && (
+        <button
+          className='admin-button'
+          onClick={() => setShowAdminPanel(!showAdminPanel)}
+        >
+          {showAdminPanel ? '✕ Close Admin' : `⚙️ Admin ${Object.keys(accessRequests).length > 0 ? `(${Object.keys(accessRequests).length})` : ''}`}
+        </button>
+      )}
+
+      {showAdminPanel && (
+        <div className='admin-panel'>
+          <h2>Access Requests</h2>
+          {Object.keys(accessRequests).length === 0 ? (
+            <p style={{color: '#888', textAlign: 'center'}}>No pending requests</p>
+          ) : (
+            <div className='access-requests'>
+              {Object.entries(accessRequests).map(([key, request]) => (
+                <div key={key} className='access-request'>
+                  <div className='request-info'>
+                    <div className='request-name'>{request.name || 'Anonymous'}</div>
+                    <div className='request-email'>{request.email}</div>
+                  </div>
+                  <div className='request-actions'>
+                    <button onClick={() => handleApproveAccess(request.email)} className='approve-btn'>
+                      ✓ Approve
+                    </button>
+                    <button onClick={() => handleRejectAccess(request.email)} className='reject-btn'>
+                      ✕ Reject
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -396,7 +702,7 @@ function App() {
                       {isEmoji(friend.avatar) ? friend.avatar : '👤'}
                     </div>
                     <b>{friend.name || 'Anonymous'}</b>
-                    {offline && <div style={{color: '#888', fontSize: '12px'}}>Not online</div>}
+                    {offline && <div style={{color: '#888', fontSize: '12px'}}>Offline</div>}
                   </div>
                 </Popup>
               </Marker>

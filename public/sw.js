@@ -1,9 +1,17 @@
 // Service Worker for Egels Map PWA
-const CACHE_NAME = 'egels-map-v2';
+const CACHE_NAME = 'egels-map-v3';
+
+// Listen for SKIP_WAITING message
+self.addEventListener('message', (event) => {
+  if (event.data && event.data.type === 'SKIP_WAITING') {
+    self.skipWaiting();
+  }
+});
 
 // Install service worker
 self.addEventListener('install', (event) => {
-  self.skipWaiting(); // Activate immediately
+  // Don't skip waiting automatically - wait for user to click update
+  console.log('Service worker installed');
 });
 
 // Network-first strategy: Try network, fallback to cache

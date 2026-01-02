@@ -39,6 +39,25 @@ body {
   gap: 2rem;
 }
 
+.login-logo {
+  width: 120px;
+  height: 120px;
+  border-radius: 24px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  animation: fadeInScale 0.5s ease;
+}
+
+@keyframes fadeInScale {
+  from {
+    opacity: 0;
+    transform: scale(0.8);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
 .login-screen h1 {
   font-size: 2.5rem;
   font-weight: 700;
@@ -90,17 +109,38 @@ body {
   z-index: 1000;
   background: #ff4444;
   color: white;
-  padding: 1rem 2rem;
+  padding: 1rem 3rem 1rem 2rem;
   border-radius: 8px;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
   max-width: 90%;
+  position: relative;
+}
+
+.error-close {
+  position: absolute;
+  top: 50%;
+  right: 12px;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  color: white;
+  font-size: 20px;
+  cursor: pointer;
+  padding: 4px 8px;
+  line-height: 1;
+  opacity: 0.8;
+  transition: opacity 0.2s ease;
+}
+
+.error-close:hover {
+  opacity: 1;
 }
 
 .install-prompt {
   position: fixed;
   bottom: 20px;
-  left: 50%;
-  transform: translateX(-50%);
+  left: 20px;
+  right: 20px;
   z-index: 1000;
   background: #667eea;
   color: white;
@@ -110,22 +150,22 @@ body {
   display: flex;
   gap: 12px;
   align-items: center;
-  max-width: 90%;
   animation: slideUp 0.3s ease;
 }
 
 @keyframes slideUp {
   from {
-    transform: translateX(-50%) translateY(100px);
+    transform: translateY(100px);
     opacity: 0;
   }
   to {
-    transform: translateX(-50%) translateY(0);
+    transform: translateY(0);
     opacity: 1;
   }
 }
 
 .install-prompt span {
+  flex: 1;
   font-size: 14px;
   font-weight: 600;
 }
@@ -268,8 +308,136 @@ body {
   transform: translateY(0);
 }
 
+.save-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+}
+
 /* Emoji icon marker */
 .emoji-icon {
   background: transparent !important;
   border: none !important;
+}
+
+/* Admin Panel */
+.admin-button {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  z-index: 1001;
+  padding: 10px 16px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  background: #667eea;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  transition: all 0.3s ease;
+}
+
+.admin-button:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.2);
+}
+
+.admin-button:active {
+  transform: translateY(0);
+}
+
+.admin-panel {
+  position: fixed;
+  top: 70px;
+  right: 20px;
+  z-index: 1000;
+  background: white;
+  border-radius: 12px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+  max-width: 400px;
+  width: 90%;
+  max-height: 70vh;
+  overflow-y: auto;
+  padding: 20px;
+}
+
+.admin-panel h2 {
+  margin: 0 0 16px 0;
+  font-size: 18px;
+  color: #333;
+}
+
+.access-requests {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.access-request {
+  background: #f5f5f5;
+  border-radius: 8px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.request-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.request-name {
+  font-weight: 600;
+  color: #333;
+  font-size: 14px;
+}
+
+.request-email {
+  font-size: 12px;
+  color: #666;
+}
+
+.request-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.approve-btn,
+.reject-btn {
+  flex: 1;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  border-radius: 6px;
+  transition: all 0.2s ease;
+}
+
+.approve-btn {
+  background: #4ade80;
+  color: white;
+}
+
+.approve-btn:hover {
+  background: #22c55e;
+  transform: translateY(-1px);
+}
+
+.reject-btn {
+  background: #f87171;
+  color: white;
+}
+
+.reject-btn:hover {
+  background: #ef4444;
+  transform: translateY(-1px);
+}
+
+.approve-btn:active,
+.reject-btn:active {
+  transform: translateY(0);
 }
