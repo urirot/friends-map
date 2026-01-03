@@ -1,7 +1,7 @@
 // Service Worker for Egels Map PWA
-// Version: 1.0.2
+// Version: 1.0.3
 // IMPORTANT: Increment this version number with EVERY deployment to trigger PWA updates!
-const CACHE_NAME = 'egels-map-v5';
+const CACHE_NAME = 'egels-map-v6';
 const TILE_CACHE_NAME = 'egels-map-tiles-v4';
 
 // Val Thorens area bounding box (just Val Thorens ski resort)
@@ -140,18 +140,28 @@ self.addEventListener('fetch', (event) => {
       })
     );
   } else {
-    // Network-first for app resources
+    // Network-first for app resources (including CSS and JS)
     event.respondWith(
       fetch(event.request)
         .then((response) => {
-          const responseToCache = response.clone();
-          caches.open(CACHE_NAME).then((cache) => {
-            cache.put(event.request, responseToCache);
-          });
+          // Only cache successful responses
+          if (response.ok) {
+            const responseToCache = response.clone();
+            caches.open(CACHE_NAME).then((cache) => {
+              cache.put(event.request, responseToCache);
+            });
+          }
           return response;
         })
         .catch(() => {
-          return caches.match(event.request);
+          // Fallback to cache if network fails
+          return caches.match(event.request).then(cachedResponse => {
+            if (cachedResponse) {
+              return cachedResponse;
+            }
+            // If no cache, return a basic error response
+            return new Response('Offline', { status: 503, statusText: 'Service Unavailable' });
+          });
         })
     );
   }
@@ -169,7 +179,9 @@ self.addEventListener('activate', (event) => {
           }
         })
       );
+    }).then(() => {
+      // Force claim clients to ensure new service worker takes control
+      return self.clients.claim();
     })
   );
-  return self.clients.claim();
 });
