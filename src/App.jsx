@@ -1,8 +1,9 @@
-import React, { useState, useEffect } from 'react';
-import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
+import React, { useState, useEffect, useRef } from 'react';
+import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
+import MarkerClusterGroup from 'react-leaflet-cluster';
 import { auth, provider, db } from './firebase';
 import { signInWithPopup, signInWithRedirect, getRedirectResult, onAuthStateChanged } from 'firebase/auth';
-import { ref, set, onValue, serverTimestamp } from 'firebase/database';
+import { ref, set, onValue, serverTimestamp, get } from 'firebase/database';
 import L from 'leaflet';
 import './App.css';
 
@@ -15,6 +16,37 @@ let DefaultIcon = L.icon({
     iconAnchor: [12, 41]
 });
 L.Marker.prototype.options.icon = DefaultIcon;
+
+// Component to handle map controls
+function MapController({ center, onCenterChange, onZoomChange }) {
+  const map = useMap();
+
+  useEffect(() => {
+    if (center && onCenterChange) {
+      onCenterChange(map);
+    }
+  }, [center, map, onCenterChange]);
+
+  useEffect(() => {
+    if (!map || !onZoomChange) return;
+
+    const handleZoom = () => {
+      onZoomChange(map.getZoom());
+    };
+
+    // Set initial zoom
+    onZoomChange(map.getZoom());
+
+    // Listen for zoom changes
+    map.on('zoomend', handleZoom);
+
+    return () => {
+      map.off('zoomend', handleZoom);
+    };
+  }, [map, onZoomChange]);
+
+  return null;
+}
 
 function App() {
   const [user, setUser] = useState(null);
@@ -36,6 +68,17 @@ function App() {
   const [requestingAccess, setRequestingAccess] = useState(false);
   const [showUpdatePrompt, setShowUpdatePrompt] = useState(false);
   const [waitingWorker, setWaitingWorker] = useState(null);
+  const [clusterRadius, setClusterRadius] = useState(50);
+  const [messageBoxEnabled, setMessageBoxEnabled] = useState(true);
+  const [sharedMessage, setSharedMessage] = useState('');
+  const [showMessageEditor, setShowMessageEditor] = useState(false);
+  const [editingMessage, setEditingMessage] = useState('');
+  const mapRef = useRef(null);
+  const [downloadingMaps, setDownloadingMaps] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState(0);
+  const [zoomLevel, setZoomLevel] = useState(15);
+  const [noSignal, setNoSignal] = useState(false);
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
 
   // Animal emojis
   const animalEmojis = [
@@ -50,6 +93,55 @@ function App() {
     '🦮', '🐕‍🦺', '🐈', '🐈‍⬛', '🪶', '🐓', '🦃', '🦤', '🦚', '🦜',
     '🦢', '🦩', '🕊', '🐇', '🦝', '🦨', '🦡', '🦫', '🦦', '🦥'
   ];
+
+  // Auto-dismiss error messages after 10 seconds
+  useEffect(() => {
+    if (error) {
+      const timer = setTimeout(() => {
+        setError(null);
+      }, 10000);
+
+      return () => clearTimeout(timer);
+    }
+  }, [error]);
+
+  // Handle online/offline status
+  useEffect(() => {
+    const handleOnline = () => {
+      setIsOnline(true);
+      setNoSignal(false);
+    };
+
+    const handleOffline = () => {
+      setIsOnline(false);
+      setNoSignal(true);
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  // Handle visibility change - update location when app comes back to foreground
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (!document.hidden && user && !needsProfile) {
+        // App just became visible, update location
+        console.log('App became visible - updating location');
+        updateUserLocation();
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [user, needsProfile]);
 
   // Handle PWA install prompt
   useEffect(() => {
@@ -93,6 +185,17 @@ function App() {
     navigator.serviceWorker.addEventListener('controllerchange', () => {
       // New service worker has taken control - reload the page
       window.location.reload();
+    });
+
+    // Listen for service worker messages (cache progress)
+    navigator.serviceWorker.addEventListener('message', (event) => {
+      if (event.data.type === 'CACHE_PROGRESS') {
+        setDownloadProgress(event.data.percentage);
+      } else if (event.data.type === 'CACHE_COMPLETE') {
+        setDownloadingMaps(false);
+        setDownloadProgress(100);
+        setTimeout(() => setDownloadProgress(0), 3000);
+      }
     });
 
     // Detect waiting service worker
@@ -237,14 +340,149 @@ function App() {
     return () => unsubscribe();
   }, [isAdmin]);
 
-  // Start Tracking Location
+  // Listen to cluster radius setting from database
+  useEffect(() => {
+    const settingsRef = ref(db, 'settings/clusterRadius');
+    const unsubscribe = onValue(settingsRef, (snapshot) => {
+      const data = snapshot.val();
+      if (data !== null) {
+        setClusterRadius(data);
+      }
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  // Listen to message box enabled setting
+  useEffect(() => {
+    const settingsRef = ref(db, 'settings/messageBoxEnabled');
+    const unsubscribe = onValue(settingsRef, (snapshot) => {
+      const data = snapshot.val();
+      if (data !== null) {
+        setMessageBoxEnabled(data);
+      }
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  // Listen to shared message
+  useEffect(() => {
+    const messageRef = ref(db, 'sharedMessage');
+    const unsubscribe = onValue(messageRef, (snapshot) => {
+      const data = snapshot.val();
+      if (data && data.text) {
+        setSharedMessage(data.text);
+      }
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  // Load all users when showing profile setup (to prevent duplicate avatars)
+  useEffect(() => {
+    if (needsProfile && user) {
+      const usersRef = ref(db, 'users');
+      const unsubscribe = onValue(usersRef, (snapshot) => {
+        const data = snapshot.val();
+        if (data) {
+          console.log('Loaded existing users for avatar checking');
+          setFriends(data);
+        }
+      });
+
+      return () => unsubscribe();
+    }
+  }, [needsProfile, user]);
+
+  // Auto-download maps when user is authenticated and has profile
+  useEffect(() => {
+    if (user && !needsProfile && !downloadingMaps) {
+      // Check if maps are already cached
+      if ('caches' in window) {
+        caches.open('egels-map-tiles-v4').then(async cache => {
+          const keys = await cache.keys();
+          console.log(`📦 Found ${keys.length} cached tiles`);
+
+          if (keys.length === 0) {
+            // Maps not cached yet, start download
+            console.log('🚀 Starting map download...');
+            handleDownloadMaps();
+          } else {
+            console.log('✅ Maps already cached');
+          }
+        });
+      }
+    }
+  }, [user, needsProfile]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Update cluster radius in database
+  const handleClusterRadiusChange = async (newRadius) => {
+    setClusterRadius(newRadius);
+    if (isAdmin) {
+      try {
+        const settingsRef = ref(db, 'settings/clusterRadius');
+        await set(settingsRef, newRadius);
+      } catch (err) {
+        console.error('Error updating cluster radius:', err);
+        setError('Failed to save cluster radius setting');
+      }
+    }
+  };
+
+  // Toggle message box enabled
+  const handleToggleMessageBox = async (enabled) => {
+    if (isAdmin) {
+      try {
+        const settingsRef = ref(db, 'settings/messageBoxEnabled');
+        await set(settingsRef, enabled);
+        setMessageBoxEnabled(enabled);
+      } catch (err) {
+        console.error('Error toggling message box:', err);
+        setError('Failed to save message box setting');
+      }
+    }
+  };
+
+  // Save shared message
+  const handleSaveMessage = async () => {
+    if (!user) return;
+
+    const trimmedMessage = editingMessage.trim();
+    if (trimmedMessage.length > 100) {
+      setError('Message must be 100 characters or less');
+      return;
+    }
+
+    try {
+      const messageRef = ref(db, 'sharedMessage');
+      await set(messageRef, {
+        text: trimmedMessage,
+        author: user.displayName || user.email,
+        timestamp: serverTimestamp()
+      });
+      setShowMessageEditor(false);
+      setEditingMessage('');
+    } catch (err) {
+      console.error('Error saving message:', err);
+      setError('Failed to save message');
+    }
+  };
+
+  // Open message editor
+  const handleOpenMessageEditor = () => {
+    setEditingMessage(sharedMessage);
+    setShowMessageEditor(true);
+  };
+
+  // Load Initial Location
   const startTracking = async (currentUser) => {
     if (!navigator.geolocation) {
       setError('Geolocation is not supported by your browser');
       return;
     }
 
-    console.log('Starting location tracking...');
+    console.log('Loading location...');
     setLoading(true);
 
     // Get user's profile data
@@ -253,72 +491,163 @@ function App() {
     const snapshot = await get(userRef);
     const userData = snapshot.val();
 
-    // Update location periodically (every 30 seconds) instead of continuously
-    let locationInterval;
+    // Load last known location from Firebase immediately
+    if (userData && userData.lat && userData.lng) {
+      console.log('Loading last known location:', userData.lat, userData.lng);
+      setPosition([userData.lat, userData.lng]);
+      setLoading(false);
+    }
 
-    const updateLocation = () => {
-      navigator.geolocation.getCurrentPosition(
-        (pos) => {
-          const { latitude, longitude } = pos.coords;
-          console.log('Location received:', latitude, longitude);
-          setPosition([latitude, longitude]);
+    let locationInterval = null;
+
+    const updateLocationInFirebase = async (latitude, longitude) => {
+      const userRef = ref(db, 'users/' + currentUser.uid);
+
+      // Get current data to check if location changed
+      const snapshot = await get(userRef);
+      const currentData = snapshot.val();
+
+      let moveCount = currentData?.moveCount || 0;
+
+      // Check if location changed at all
+      if (currentData?.lat && currentData?.lng) {
+        const latChanged = currentData.lat !== latitude;
+        const lngChanged = currentData.lng !== longitude;
+
+        if (latChanged || lngChanged) {
+          moveCount += 1;
+          console.log(`Location changed. Move count: ${moveCount}`);
+        }
+      } else {
+        // First location update
+        moveCount = 0;
+      }
+
+      set(userRef, {
+        name: userData.name,
+        avatar: userData.avatar,
+        lat: latitude,
+        lng: longitude,
+        moveCount: moveCount,
+        lastUpdated: serverTimestamp()
+      }).catch(err => {
+        console.error('Error updating location:', err);
+        setError('Failed to update location. Check Firebase permissions.');
+      });
+    };
+
+    // Function to fetch friends' locations
+    const fetchFriendsLocations = async () => {
+      try {
+        const usersRef = ref(db, 'users');
+        const snapshot = await get(usersRef);
+        const data = snapshot.val();
+        if (data) {
+          console.log('Fetched friends locations');
+          setFriends(data);
+        }
+      } catch (err) {
+        console.error('Error reading locations:', err);
+        setError('Failed to load friends. Check Firebase permissions.');
+      }
+    };
+
+    // Function to fetch shared message
+    const fetchSharedMessage = async () => {
+      try {
+        const messageRef = ref(db, 'sharedMessage');
+        const snapshot = await get(messageRef);
+        const data = snapshot.val();
+        if (data && data.text) {
+          console.log('Fetched shared message:', data.text);
+          setSharedMessage(data.text);
+        } else {
+          setSharedMessage('');
+        }
+      } catch (err) {
+        console.error('Error reading shared message:', err);
+      }
+    };
+
+    // Fetch friends' locations immediately
+    fetchFriendsLocations();
+
+    // Fetch shared message immediately
+    fetchSharedMessage();
+
+    // Get current location in background
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const { latitude, longitude } = pos.coords;
+        console.log('Current location received:', latitude, longitude);
+        setPosition([latitude, longitude]);
+        setLoading(false);
+        setError(null);
+        setNoSignal(false);
+
+        // Update Firebase
+        updateLocationInFirebase(latitude, longitude);
+
+        // Start 1-minute interval for updates
+        locationInterval = setInterval(() => {
+          console.log('Updating location (1-min interval)');
+          // Update own location
+          navigator.geolocation.getCurrentPosition(
+            (pos) => {
+              const { latitude, longitude } = pos.coords;
+              console.log('Periodic location update:', latitude, longitude);
+              setPosition([latitude, longitude]);
+              updateLocationInFirebase(latitude, longitude);
+              setNoSignal(false);
+            },
+            (err) => {
+              console.error('Periodic location error:', err);
+              if (err.code === err.POSITION_UNAVAILABLE || err.code === err.TIMEOUT) {
+                setNoSignal(true);
+              }
+            },
+            {
+              enableHighAccuracy: false,
+              timeout: 15000,
+              maximumAge: 60000  // Accept cached position up to 1 minute
+            }
+          );
+          // Also fetch friends' locations and shared message
+          fetchFriendsLocations();
+          fetchSharedMessage();
+        }, 60000);  // Every 1 minute
+      },
+      (err) => {
+        console.error('Geolocation error:', err);
+
+        // Only show error if we don't have a last known position
+        if (!userData || !userData.lat || !userData.lng) {
           setLoading(false);
-          setError(null);
-
-          // Write to Firebase - preserve name and avatar
-          const userRef = ref(db, 'users/' + currentUser.uid);
-          set(userRef, {
-            name: userData.name,
-            avatar: userData.avatar,
-            lat: latitude,
-            lng: longitude,
-            lastUpdated: serverTimestamp()
-          }).catch(err => {
-            console.error('Error updating location:', err);
-            setError('Failed to update location. Check Firebase permissions.');
-          });
-        },
-        (err) => {
-          console.error('Geolocation error:', err);
-          setLoading(false);
-
           switch(err.code) {
             case err.PERMISSION_DENIED:
               setError('Location permission denied. Please enable location access.');
               break;
             case err.POSITION_UNAVAILABLE:
-              setError('Location information unavailable.');
+              setNoSignal(true);
               break;
             case err.TIMEOUT:
-              setError('Location request timed out.');
+              setNoSignal(true);
               break;
             default:
               setError('An unknown error occurred while getting location.');
           }
-        },
-        {
-          enableHighAccuracy: false,  // Use network/WiFi location (faster, less battery)
-          timeout: 30000,  // Increased to 30 seconds
-          maximumAge: 120000  // Accept cached position up to 2 minutes old
+        } else {
+          // We have last known position, just log the error
+          console.log('Using last known position due to location error');
+          setLoading(false);
         }
-      );
-    };
-
-    // Get initial location
-    updateLocation();
-
-    // Update every 2 minutes
-    locationInterval = setInterval(updateLocation, 120000);
-
-    // Listen for friends' locations
-    const usersRef = ref(db, 'users');
-    onValue(usersRef, (snapshot) => {
-      const data = snapshot.val();
-      if (data) setFriends(data);
-    }, (err) => {
-      console.error('Error reading locations:', err);
-      setError('Failed to load friends. Check Firebase permissions.');
-    });
+      },
+      {
+        enableHighAccuracy: false,  // Use network/WiFi location (faster, less battery)
+        timeout: 30000,  // 30 second timeout for initial load
+        maximumAge: 60000  // Accept cached position up to 1 minute old
+      }
+    );
 
     // Cleanup
     return () => {
@@ -531,9 +860,181 @@ function App() {
     return (now - lastUpdated) > sixteenMinutes;
   };
 
+  // Create custom cluster icon
+  const createClusterCustomIcon = (cluster) => {
+    const count = cluster.getChildCount();
+
+    const html = `
+      <div style="
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 2px;
+      ">
+        <div style="font-size: 32px;">👑</div>
+        <div style="
+          background: #667eea;
+          color: white;
+          border-radius: 50%;
+          width: 36px;
+          height: 36px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-weight: 700;
+          font-size: 14px;
+          box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+        ">${count}</div>
+      </div>
+    `;
+
+    return L.divIcon({
+      html: html,
+      className: 'custom-cluster-icon',
+      iconSize: L.point(40, 60, true)
+    });
+  };
+
+  // Update user location in database
+  const updateUserLocation = async () => {
+    if (!user || !navigator.geolocation) return;
+
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        const { latitude, longitude } = pos.coords;
+
+        // Get user's profile data
+        const userRef = ref(db, 'users/' + user.uid);
+        const snapshot = await get(userRef);
+        const userData = snapshot.val();
+
+        let moveCount = userData?.moveCount || 0;
+
+        // Check if location changed at all
+        if (userData?.lat && userData?.lng) {
+          const latChanged = userData.lat !== latitude;
+          const lngChanged = userData.lng !== longitude;
+
+          if (latChanged || lngChanged) {
+            moveCount += 1;
+            console.log(`Location changed. Move count: ${moveCount}`);
+          }
+        } else {
+          // First location update
+          moveCount = 0;
+        }
+
+        // Update location in Firebase
+        await set(userRef, {
+          name: userData.name,
+          avatar: userData.avatar,
+          lat: latitude,
+          lng: longitude,
+          moveCount: moveCount,
+          lastUpdated: serverTimestamp()
+        });
+
+        setPosition([latitude, longitude]);
+        setNoSignal(false);
+
+        // Also fetch friends' locations and shared message
+        try {
+          const usersRef = ref(db, 'users');
+          const usersSnapshot = await get(usersRef);
+          const data = usersSnapshot.val();
+          if (data) {
+            console.log('Fetched friends locations on manual update');
+            setFriends(data);
+          }
+
+          // Fetch shared message
+          const messageRef = ref(db, 'sharedMessage');
+          const messageSnapshot = await get(messageRef);
+          const messageData = messageSnapshot.val();
+          if (messageData && messageData.text) {
+            setSharedMessage(messageData.text);
+          } else {
+            setSharedMessage('');
+          }
+        } catch (err) {
+          console.error('Error reading locations:', err);
+        }
+      },
+      (err) => {
+        console.error('Geolocation error:', err);
+        if (err.code === err.POSITION_UNAVAILABLE || err.code === err.TIMEOUT) {
+          setNoSignal(true);
+        } else {
+          setError('Failed to get location');
+        }
+      },
+      {
+        enableHighAccuracy: false,
+        timeout: 10000,
+        maximumAge: 600000  // Accept cached position up to 10 minutes old
+      }
+    );
+  };
+
+  // Manual refresh function - update location and fetch latest data
+  const handleRefresh = () => {
+    console.log('🔄 Refreshing location and data...');
+    updateUserLocation();
+  };
+
+  // Center map on user location and update it
+  const handleCenter = () => {
+    if (!mapRef.current || !position) return;
+
+    updateUserLocation();
+
+    // Center the map on user's position
+    if (mapRef.current) {
+      mapRef.current.setView(position, 15);
+    }
+  };
+
+  // Download offline maps
+  const handleDownloadMaps = async () => {
+    if (!('serviceWorker' in navigator)) {
+      setError('Service Worker not supported');
+      return;
+    }
+
+    setDownloadingMaps(true);
+    setDownloadProgress(0);
+
+    try {
+      const registration = await navigator.serviceWorker.ready;
+      registration.active.postMessage({ type: 'CACHE_TILES' });
+    } catch (err) {
+      console.error('Failed to start map download:', err);
+      setError('Failed to download maps');
+      setDownloadingMaps(false);
+    }
+  };
+
   // Show nothing while checking auth state
   if (authLoading) {
     return null;
+  }
+
+  // No signal screen
+  if (noSignal) {
+    return (
+      <div className='login-screen'>
+        <img src='/sad_egel.jpg' alt='No Signal' style={{width: '200px', height: '200px', borderRadius: '50%', objectFit: 'cover'}} />
+        <h1 style={{textAlign: 'center'}}>No Internet Connection</h1>
+        <p style={{textAlign: 'center'}}>Please check your connection and try again</p>
+        <button onClick={() => {
+          setNoSignal(false);
+          setLoading(true);
+          if (user) {
+            startTracking(user);
+          }
+        }}>Retry</button>
+      </div>
+    );
   }
 
   if (!user) {
@@ -553,9 +1054,8 @@ function App() {
           <button onClick={handleLogin}>Sign in with Google</button>
         )}
         {error && (
-          <div className='error-message'>
+          <div className='error-message' style={error.includes('Access denied') ? {background: '#f59e0b'} : {}}>
             {error}
-            <button className='error-close' onClick={() => setError(null)}>✕</button>
           </div>
         )}
       </div>
@@ -582,15 +1082,28 @@ function App() {
           />
 
           <div className='emoji-grid'>
-            {animalEmojis.map((emoji) => (
-              <button
-                key={emoji}
-                className={`emoji-button ${selectedEmoji === emoji ? 'selected' : ''}`}
-                onClick={() => setSelectedEmoji(emoji)}
-              >
-                {emoji}
-              </button>
-            ))}
+            {animalEmojis.map((emoji) => {
+              // Check if this emoji is already in use by another user
+              const isUsed = Object.values(friends).some(
+                (friend) => friend.avatar === emoji && friend.avatar !== selectedEmoji
+              );
+              return (
+                <button
+                  key={emoji}
+                  className={`emoji-button ${selectedEmoji === emoji ? 'selected' : ''}`}
+                  onClick={() => !isUsed && setSelectedEmoji(emoji)}
+                  disabled={isUsed}
+                  title={isUsed ? 'Claimed!' : ''}
+                  style={isUsed ? {
+                    opacity: 0.3,
+                    cursor: 'not-allowed',
+                    filter: 'grayscale(100%)'
+                  } : {}}
+                >
+                  {emoji}
+                </button>
+              );
+            })}
           </div>
 
           <button onClick={handleSaveProfile} className='save-button' disabled={loading}>
@@ -598,9 +1111,8 @@ function App() {
           </button>
         </div>
         {error && (
-          <div className='error-message'>
+          <div className='error-message' style={error.includes('Access denied') ? {background: '#f59e0b'} : {}}>
             {error}
-            <button className='error-close' onClick={() => setError(null)}>✕</button>
           </div>
         )}
       </div>
@@ -610,13 +1122,50 @@ function App() {
   return (
     <div className='App'>
       {error && (
-        <div className='error-message'>
+        <div className='error-message' style={error.includes('Access denied') ? {background: '#f59e0b'} : {}}>
           {error}
-          <button className='error-close' onClick={() => setError(null)}>✕</button>
         </div>
       )}
 
-      {showUpdatePrompt && (
+      {messageBoxEnabled && user && !needsProfile && (
+        <div
+          className='message-box'
+          onClick={handleOpenMessageEditor}
+        >
+          {sharedMessage || 'Click to set a message for everyone...'}
+        </div>
+      )}
+
+      {showMessageEditor && (
+        <div className='message-editor-overlay' onClick={() => setShowMessageEditor(false)}>
+          <div className='message-editor' onClick={(e) => e.stopPropagation()}>
+            <h3 style={{margin: '0 0 16px 0', fontSize: '18px', color: '#333'}}>
+              Shared Message
+            </h3>
+            <textarea
+              value={editingMessage}
+              onChange={(e) => setEditingMessage(e.target.value)}
+              placeholder='Enter a message for everyone...'
+              maxLength={100}
+              className='message-textarea'
+              autoFocus
+            />
+            <div style={{fontSize: '12px', color: '#666', marginBottom: '16px', textAlign: 'right'}}>
+              {editingMessage.length}/100
+            </div>
+            <div style={{display: 'flex', gap: '8px'}}>
+              <button onClick={handleSaveMessage} className='save-message-btn'>
+                Save
+              </button>
+              <button onClick={() => setShowMessageEditor(false)} className='cancel-message-btn'>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showUpdatePrompt && !loading && (
         <div className='install-prompt' style={{background: '#4ade80'}}>
           <span>🎉 New update available!</span>
           <button onClick={handleUpdate}>Update Now</button>
@@ -643,20 +1192,98 @@ function App() {
         </div>
       )}
 
+      {downloadingMaps && downloadProgress > 0 && downloadProgress < 100 && (
+        <div className='install-prompt' style={{background: '#667eea'}}>
+          <span>📥 Downloading Val Thorens map... {downloadProgress}%</span>
+          <div style={{
+            flex: 1,
+            maxWidth: '100px',
+            height: '6px',
+            background: 'white',
+            borderRadius: '3px',
+            overflow: 'hidden'
+          }}>
+            <div style={{
+              width: `${downloadProgress}%`,
+              height: '100%',
+              background: 'white',
+              transition: 'width 0.3s ease'
+            }} />
+          </div>
+        </div>
+      )}
+
+      {downloadProgress === 100 && (
+        <div className='install-prompt' style={{background: '#4ade80'}}>
+          <span>✅ Val Thorens map downloaded!</span>
+        </div>
+      )}
+
       {isAdmin && (
         <button
           className='admin-button'
           onClick={() => setShowAdminPanel(!showAdminPanel)}
         >
-          {showAdminPanel ? '✕ Close Admin' : `⚙️ Admin ${Object.keys(accessRequests).length > 0 ? `(${Object.keys(accessRequests).length})` : ''}`}
+          {showAdminPanel ? '✕' : Object.keys(accessRequests).length > 0 ? `⚙️ ${Object.keys(accessRequests).length}` : '⚙️'}
         </button>
+      )}
+
+      {position && (
+        <>
+          <button className='refresh-button' onClick={handleRefresh}>
+            🔄
+          </button>
+          <button className='center-button' onClick={handleCenter}>
+            <img src="/icon-512.png" style={{width: '20px', height: '20px', borderRadius: '50%'}} alt="Center" />
+          </button>
+        </>
+      )}
+
+      {isAdmin && position && (
+        <div className='zoom-indicator'>
+          Zoom: {zoomLevel}
+        </div>
       )}
 
       {showAdminPanel && (
         <div className='admin-panel'>
-          <h2>Access Requests</h2>
+          <h2>Admin Panel</h2>
+
+          <div style={{marginBottom: '20px'}}>
+            <label style={{display: 'block', fontSize: '14px', fontWeight: '600', color: '#333', marginBottom: '8px'}}>
+              Cluster Radius: {clusterRadius}px
+            </label>
+            <input
+              type='range'
+              min='0'
+              max='150'
+              value={clusterRadius}
+              onChange={(e) => handleClusterRadiusChange(Number(e.target.value))}
+              style={{width: '100%'}}
+            />
+            <div style={{display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: '#666', marginTop: '4px'}}>
+              <span>No clustering</span>
+              <span>Max clustering</span>
+            </div>
+          </div>
+
+          <div style={{marginBottom: '20px', paddingTop: '20px', borderTop: '1px solid #e5e7eb'}}>
+            <label style={{display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer'}}>
+              <input
+                type='checkbox'
+                checked={messageBoxEnabled}
+                onChange={(e) => handleToggleMessageBox(e.target.checked)}
+                style={{width: '18px', height: '18px', cursor: 'pointer'}}
+              />
+              <span style={{fontSize: '14px', fontWeight: '600', color: '#333'}}>
+                Enable Shared Message Box
+              </span>
+            </label>
+          </div>
+
+          <h3 style={{fontSize: '16px', margin: '0 0 12px 0', color: '#333'}}>Access Requests</h3>
           {Object.keys(accessRequests).length === 0 ? (
-            <p style={{color: '#888', textAlign: 'center'}}>No pending requests</p>
+            <p style={{color: '#888', textAlign: 'center', margin: '0'}}>No pending requests</p>
           ) : (
             <div className='access-requests'>
               {Object.entries(accessRequests).map(([key, request]) => (
@@ -681,33 +1308,64 @@ function App() {
       )}
 
       {position ? (
-        <MapContainer center={position} zoom={15} scrollWheelZoom={true}>
+        <MapContainer
+          center={position}
+          zoom={15}
+          scrollWheelZoom={true}
+          ref={mapRef}
+        >
+          <MapController
+            center={position}
+            onCenterChange={(map) => { mapRef.current = map; }}
+            onZoomChange={setZoomLevel}
+          />
           <TileLayer
             attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
             url='https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'
           />
 
-          {/* Render Friends */}
-          {Object.entries(friends).map(([key, friend]) => {
-            const offline = isUserOffline(friend.lastUpdated);
-            return friend.lat && friend.lng && (
-              <Marker
-                key={key}
-                position={[friend.lat, friend.lng]}
-                icon={createIcon(friend.avatar || '👤', offline)}
-              >
-                <Popup>
-                  <div style={{textAlign: 'center'}}>
-                    <div style={{fontSize: '40px', marginBottom: '8px'}}>
-                      {isEmoji(friend.avatar) ? friend.avatar : '👤'}
+          <MarkerClusterGroup
+            chunkedLoading
+            maxClusterRadius={clusterRadius}
+            spiderfyOnMaxZoom={true}
+            showCoverageOnHover={false}
+            zoomToBoundsOnClick={true}
+            iconCreateFunction={createClusterCustomIcon}
+          >
+            {/* Render Friends */}
+            {Object.entries(friends).map(([key, friend]) => {
+              const isCurrentUser = user && key === user.uid;
+              const offline = isCurrentUser ? false : isUserOffline(friend.lastUpdated);
+              return friend.lat && friend.lng && (
+                <Marker
+                  key={key}
+                  position={[friend.lat, friend.lng]}
+                  icon={createIcon(friend.avatar || '👤', offline)}
+                >
+                  <Popup>
+                    <div style={{textAlign: 'center'}}>
+                      {isCurrentUser ? (
+                        <>
+                          <div style={{fontSize: '40px', marginBottom: '8px'}}>
+                            {isEmoji(friend.avatar) ? friend.avatar : '👤'}
+                          </div>
+                          <b>{friend.name || 'You'} (You)</b>
+                        </>
+                      ) : (
+                        <>
+                          <div style={{fontSize: '40px', marginBottom: '8px'}}>
+                            {isEmoji(friend.avatar) ? friend.avatar : '👤'}
+                          </div>
+                          <b>{friend.name || 'Anonymous'}</b>
+                          {offline && <div style={{color: '#888', fontSize: '12px'}}>Offline</div>}
+                        </>
+                      )}
                     </div>
-                    <b>{friend.name || 'Anonymous'}</b>
-                    {offline && <div style={{color: '#888', fontSize: '12px'}}>Offline</div>}
-                  </div>
-                </Popup>
-              </Marker>
-            );
-          })}
+                  </Popup>
+                </Marker>
+              );
+            })}
+          </MarkerClusterGroup>
         </MapContainer>
       ) : (
         <div className='loading-overlay' style={{height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center'}}>

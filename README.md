@@ -82,14 +82,40 @@ To restrict access to only your friends, set up Firebase Realtime Database Rules
 ```json
 {
   "rules": {
-    ".read": "auth != null && root.child('whitelist').child(auth.token.email.replace('.', ',')).exists()",
-    ".write": "auth != null && root.child('whitelist').child(auth.token.email.replace('.', ',')).exists()",
     "whitelist": {
-      ".read": false,
-      ".write": false
+      ".read": "auth != null",
+      ".write": "root.child('admins').child(auth.token.email.replace('.', ',')).val() === true"
+    },
+    "admins": {
+      ".read": "auth != null",
+      ".write": "root.child('admins').child(auth.token.email.replace('.', ',')).val() === true"
+    },
+    "users": {
+      ".read": "auth != null",
+      "$uid": {
+        ".write": "auth != null && auth.uid == $uid"
+      }
+    },
+    "accessRequests": {
+      ".read": "root.child('admins').child(auth.token.email.replace('.', ',')).val() === true",
+      ".write": "auth != null"
+    },
+    "settings": {
+      ".read": "auth != null",
+      "clusterRadius": {
+        ".write": "root.child('admins').child(auth.token.email.replace('.', ',')).val() === true"
+      },
+      "messageBoxEnabled": {
+        ".write": "root.child('admins').child(auth.token.email.replace('.', ',')).val() === true"
+      }
+    },
+    "sharedMessage": {
+      ".read": "auth != null",
+      ".write": "auth != null"
     }
   }
 }
+
 ```
 
 3. Click **Publish**
