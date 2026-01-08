@@ -1,7 +1,7 @@
 // Service Worker for Egels Map PWA
-// Version: 1.0.3
+// Version: 1.0.5
 // IMPORTANT: Increment this version number with EVERY deployment to trigger PWA updates!
-const CACHE_NAME = 'egels-map-v6';
+const CACHE_NAME = 'egels-map-v8';
 const TILE_CACHE_NAME = 'egels-map-tiles-v4';
 
 // Val Thorens area bounding box (just Val Thorens ski resort)

@@ -1,7 +1,7 @@
 import React from 'react';
 import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
 import MarkerClusterGroup from 'react-leaflet-cluster';
-import { createIcon, createClusterCustomIcon, isEmoji, isUserOffline } from '../utils/mapUtils';
+import { createIcon, createClusterCustomIcon, isEmoji, isUserOffline, formatLastUpdated } from '../utils/mapUtils';
 
 // Component to handle map controls
 function MapController({ center, onCenterChange, onZoomChange }) {
@@ -81,6 +81,12 @@ export default function MapView({
         {Object.entries(friends).map(([key, friend]) => {
           const isCurrentUser = user && key === user.uid;
           const offline = isCurrentUser ? false : isUserOffline(friend.lastUpdated);
+          
+          // Debug: log lastUpdated to see what format we're getting
+          if (friend.lastUpdated) {
+            console.log(`User ${friend.name} lastUpdated:`, friend.lastUpdated, 'Type:', typeof friend.lastUpdated);
+          }
+          
           return friend.lat && friend.lng && (
             <Marker
               key={key}
@@ -95,6 +101,9 @@ export default function MapView({
                         {isEmoji(friend.avatar) ? friend.avatar : '👤'}
                       </div>
                       <b>{friend.name || 'You'} (You)</b>
+                      <div style={{color: '#666', fontSize: '11px', marginTop: '4px'}}>
+                        Last seen: {formatLastUpdated(friend.lastUpdated)}
+                      </div>
                     </>
                   ) : (
                     <>
@@ -102,6 +111,9 @@ export default function MapView({
                         {isEmoji(friend.avatar) ? friend.avatar : '👤'}
                       </div>
                       <b>{friend.name || 'Anonymous'}</b>
+                      <div style={{color: '#666', fontSize: '11px', marginTop: '4px'}}>
+                        Last seen: {formatLastUpdated(friend.lastUpdated)}
+                      </div>
                       {offline && <div style={{color: '#888', fontSize: '12px'}}>Offline</div>}
                     </>
                   )}

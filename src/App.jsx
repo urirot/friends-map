@@ -66,6 +66,8 @@ function App() {
   const [noSignal, setNoSignal] = useState(false);
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [showUsersPanel, setShowUsersPanel] = useState(false);
+  const noSignalTimeoutRef = useRef(null);
+  const geolocationFailureCountRef = useRef(0);
 
   // Auto-dismiss error messages after 10 seconds
   useEffect(() => {
@@ -78,16 +80,30 @@ function App() {
     }
   }, [error]);
 
-  // Handle online/offline status
+  // Handle online/offline status with delay
   useEffect(() => {
     const handleOnline = () => {
       setIsOnline(true);
       setNoSignal(false);
+      geolocationFailureCountRef.current = 0;
+      if (noSignalTimeoutRef.current) {
+        clearTimeout(noSignalTimeoutRef.current);
+        noSignalTimeoutRef.current = null;
+      }
     };
 
     const handleOffline = () => {
       setIsOnline(false);
-      setNoSignal(true);
+      // Don't immediately show no signal - wait 3 seconds to see if connection recovers
+      if (noSignalTimeoutRef.current) {
+        clearTimeout(noSignalTimeoutRef.current);
+      }
+      noSignalTimeoutRef.current = setTimeout(() => {
+        // Only show no signal if still offline after delay
+        if (!navigator.onLine) {
+          setNoSignal(true);
+        }
+      }, 3000);
     };
 
     window.addEventListener('online', handleOnline);
@@ -96,6 +112,9 @@ function App() {
     return () => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
+      if (noSignalTimeoutRef.current) {
+        clearTimeout(noSignalTimeoutRef.current);
+      }
     };
   }, []);
 
@@ -136,15 +155,15 @@ function App() {
 
         setPosition([latitude, longitude]);
         setNoSignal(false);
+        geolocationFailureCountRef.current = 0; // Reset failure count on success
+        if (noSignalTimeoutRef.current) {
+          clearTimeout(noSignalTimeoutRef.current);
+          noSignalTimeoutRef.current = null;
+        }
 
         try {
-          const usersRef = ref(db, 'users');
-          const usersSnapshot = await get(usersRef);
-          const data = usersSnapshot.val();
-          if (data) {
-            console.log('Fetched friends locations on manual update');
-            setFriends(data);
-          }
+          // Friends locations are already updated via real-time listener
+          // No need to fetch manually here
 
           const messageRef = ref(db, 'sharedMessage');
           const messageSnapshot = await get(messageRef);
@@ -161,32 +180,62 @@ function App() {
       (err) => {
         console.error('Geolocation error:', err);
         if (err.code === err.POSITION_UNAVAILABLE || err.code === err.TIMEOUT) {
-          setNoSignal(true);
+          // Increment failure count
+          geolocationFailureCountRef.current += 1;
+          
+          // Only show no signal after 2 consecutive failures with a delay
+          if (geolocationFailureCountRef.current >= 2) {
+            if (noSignalTimeoutRef.current) {
+              clearTimeout(noSignalTimeoutRef.current);
+            }
+            noSignalTimeoutRef.current = setTimeout(() => {
+              setNoSignal(true);
+            }, 2000);
+          }
         } else {
           setError('Failed to get location');
         }
       },
       {
         enableHighAccuracy: false,
-        timeout: 10000,
+        timeout: 15000, // Increased from 10s to 15s
         maximumAge: 600000
       }
     );
   }, [user]);
 
-  // Handle visibility change - update location when app comes back to foreground
+  // Handle visibility change and focus events - update location when app becomes active
   useEffect(() => {
+    if (!user || needsProfile) return;
+
     const handleVisibilityChange = () => {
-      if (!document.hidden && user && !needsProfile) {
-        console.log('App became visible - updating location');
+      if (!document.hidden) {
+        console.log('📱 App became visible - updating location');
+        updateUserLocation();
+      }
+    };
+
+    const handleFocus = () => {
+      console.log('📱 App received focus (phone woke up) - updating location');
+      updateUserLocation();
+    };
+
+    const handlePageshow = (event) => {
+      // Handle page being restored from back/forward cache
+      if (event.persisted) {
+        console.log('📱 Page restored from cache - updating location');
         updateUserLocation();
       }
     };
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('focus', handleFocus);
+    window.addEventListener('pageshow', handlePageshow);
 
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', handleFocus);
+      window.removeEventListener('pageshow', handlePageshow);
     };
   }, [user, needsProfile, updateUserLocation]);
 
@@ -538,20 +587,19 @@ function App() {
       });
     };
 
-    const fetchFriendsLocations = async () => {
-      try {
-        const usersRef = ref(db, 'users');
-        const snapshot = await get(usersRef);
-        const data = snapshot.val();
-        if (data) {
-          console.log('Fetched friends locations');
-          setFriends(data);
-        }
-      } catch (err) {
-        console.error('Error reading locations:', err);
-        setError('Failed to load friends. Check Firebase permissions.');
+    // Set up real-time listener for all users' locations
+    const usersRef = ref(db, 'users');
+    console.log('📡 Setting up real-time listener for users locations');
+    const unsubscribeUsers = onValue(usersRef, (snapshot) => {
+      const data = snapshot.val();
+      if (data) {
+        console.log('📥 Received real-time users location update');
+        setFriends(data);
       }
-    };
+    }, (error) => {
+      console.error('Error listening to users locations:', error);
+      setError('Failed to load friends. Check Firebase permissions.');
+    });
 
     const fetchSharedMessage = async () => {
       try {
@@ -569,7 +617,6 @@ function App() {
       }
     };
 
-    fetchFriendsLocations();
     fetchSharedMessage();
 
     navigator.geolocation.getCurrentPosition(
@@ -584,29 +631,57 @@ function App() {
         updateLocationInFirebase(latitude, longitude);
 
         locationInterval = setInterval(() => {
-          console.log('Updating location (1-min interval)');
+          console.log('⏰ Periodic location update (every 60 seconds)');
           navigator.geolocation.getCurrentPosition(
-            (pos) => {
+            async (pos) => {
               const { latitude, longitude } = pos.coords;
-              console.log('Periodic location update:', latitude, longitude);
+              console.log('✅ Periodic location update received:', latitude, longitude);
               setPosition([latitude, longitude]);
-              updateLocationInFirebase(latitude, longitude);
+              await updateLocationInFirebase(latitude, longitude);
               setNoSignal(false);
+              geolocationFailureCountRef.current = 0; // Reset failure count on success
+              if (noSignalTimeoutRef.current) {
+                clearTimeout(noSignalTimeoutRef.current);
+                noSignalTimeoutRef.current = null;
+              }
+              
+              // Also fetch shared message on periodic update
+              try {
+                const messageRef = ref(db, 'sharedMessage');
+                const messageSnapshot = await get(messageRef);
+                const messageData = messageSnapshot.val();
+                if (messageData && messageData.text) {
+                  setSharedMessage(messageData.text);
+                } else {
+                  setSharedMessage('');
+                }
+              } catch (err) {
+                console.error('Error reading shared message on periodic update:', err);
+              }
             },
             (err) => {
               console.error('Periodic location error:', err);
               if (err.code === err.POSITION_UNAVAILABLE || err.code === err.TIMEOUT) {
-                setNoSignal(true);
+                // Increment failure count
+                geolocationFailureCountRef.current += 1;
+                
+                // Only show no signal after 3 consecutive failures with a delay
+                if (geolocationFailureCountRef.current >= 3) {
+                  if (noSignalTimeoutRef.current) {
+                    clearTimeout(noSignalTimeoutRef.current);
+                  }
+                  noSignalTimeoutRef.current = setTimeout(() => {
+                    setNoSignal(true);
+                  }, 3000);
+                }
               }
             },
             {
               enableHighAccuracy: false,
-              timeout: 15000,
+              timeout: 20000, // Increased from 15s to 20s for periodic updates
               maximumAge: 60000
             }
           );
-          fetchFriendsLocations();
-          fetchSharedMessage();
         }, 60000);
       },
       (err) => {
@@ -619,10 +694,28 @@ function App() {
               setError('Location permission denied. Please enable location access.');
               break;
             case err.POSITION_UNAVAILABLE:
-              setNoSignal(true);
+              // Don't immediately show no signal - wait and retry
+              geolocationFailureCountRef.current += 1;
+              if (geolocationFailureCountRef.current >= 2) {
+                if (noSignalTimeoutRef.current) {
+                  clearTimeout(noSignalTimeoutRef.current);
+                }
+                noSignalTimeoutRef.current = setTimeout(() => {
+                  setNoSignal(true);
+                }, 3000);
+              }
               break;
             case err.TIMEOUT:
-              setNoSignal(true);
+              // Don't immediately show no signal - wait and retry
+              geolocationFailureCountRef.current += 1;
+              if (geolocationFailureCountRef.current >= 2) {
+                if (noSignalTimeoutRef.current) {
+                  clearTimeout(noSignalTimeoutRef.current);
+                }
+                noSignalTimeoutRef.current = setTimeout(() => {
+                  setNoSignal(true);
+                }, 3000);
+              }
               break;
             default:
               setError('An unknown error occurred while getting location.');
@@ -639,9 +732,15 @@ function App() {
       }
     );
 
+    // Cleanup
     return () => {
       if (locationInterval) {
         clearInterval(locationInterval);
+      }
+      // Unsubscribe from real-time users listener
+      if (unsubscribeUsers) {
+        console.log('🔌 Unsubscribing from users location updates');
+        unsubscribeUsers();
       }
     };
   };
@@ -785,16 +884,32 @@ function App() {
   };
 
 
-  const handleRefresh = () => {
+  const handleRefresh = async () => {
     console.log('🔄 Refreshing location and data...');
     updateUserLocation();
+    
+    // Also fetch shared message on refresh
+    try {
+      const messageRef = ref(db, 'sharedMessage');
+      const messageSnapshot = await get(messageRef);
+      const messageData = messageSnapshot.val();
+      if (messageData && messageData.text) {
+        setSharedMessage(messageData.text);
+      } else {
+        setSharedMessage('');
+      }
+    } catch (err) {
+      console.error('Error reading shared message on refresh:', err);
+    }
   };
 
   const handleCenter = () => {
     if (!mapRef.current || !position) return;
 
+    console.log('📍 Focus button clicked - updating location');
     updateUserLocation();
 
+    // Center the map on current position (will use updated position after update completes)
     if (mapRef.current) {
       mapRef.current.setView(position, 15);
     }

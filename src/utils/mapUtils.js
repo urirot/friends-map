@@ -12,9 +12,55 @@ export const isEmoji = (str) => {
 // Check if user is offline (no update in 16 minutes)
 export const isUserOffline = (lastUpdated) => {
   if (!lastUpdated) return true;
+  
+  let timestamp;
+  
+  // Handle Firebase timestamp format
+  if (typeof lastUpdated === 'object' && lastUpdated.seconds) {
+    timestamp = lastUpdated.seconds * 1000;
+  } else if (typeof lastUpdated === 'number') {
+    // If it's already in milliseconds
+    if (lastUpdated < 1000000000000) {
+      timestamp = lastUpdated * 1000;
+    } else {
+      timestamp = lastUpdated;
+    }
+  } else {
+    return true; // Unknown format, consider offline
+  }
+  
   const now = Date.now();
   const sixteenMinutes = 16 * 60 * 1000;
-  return (now - lastUpdated) > sixteenMinutes;
+  return (now - timestamp) > sixteenMinutes;
+};
+
+// Format timestamp to "dd hh:mm" format (e.g., "Mon 14:30")
+export const formatLastUpdated = (lastUpdated) => {
+  if (!lastUpdated) return 'Never';
+  
+  let timestamp;
+  
+  // Handle Firebase timestamp format
+  if (typeof lastUpdated === 'object' && lastUpdated.seconds) {
+    timestamp = lastUpdated.seconds * 1000;
+  } else if (typeof lastUpdated === 'number') {
+    // If it's already in milliseconds
+    if (lastUpdated < 1000000000000) {
+      timestamp = lastUpdated * 1000;
+    } else {
+      timestamp = lastUpdated;
+    }
+  } else {
+    return 'Unknown';
+  }
+  
+  const date = new Date(timestamp);
+  const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const day = days[date.getDay()];
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  
+  return `${day} ${hours}:${minutes}`;
 };
 
 import L from 'leaflet';
@@ -51,32 +97,24 @@ export const createClusterCustomIcon = (cluster) => {
 
   const html = `
     <div style="
+      background: #667eea;
+      color: white;
+      border-radius: 50%;
+      width: 36px;
+      height: 36px;
       display: flex;
-      flex-direction: column;
       align-items: center;
-      gap: 2px;
-    ">
-      <div style="font-size: 32px;">👑</div>
-      <div style="
-        background: #667eea;
-        color: white;
-        border-radius: 50%;
-        width: 36px;
-        height: 36px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-weight: 700;
-        font-size: 14px;
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
-      ">${count}</div>
-    </div>
+      justify-content: center;
+      font-weight: 700;
+      font-size: 14px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+    ">${count}</div>
   `;
 
   return L.divIcon({
     html: html,
     className: 'custom-cluster-icon',
-    iconSize: L.point(40, 60, true)
+    iconSize: L.point(36, 36, true)
   });
 };
 
